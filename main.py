@@ -1,201 +1,176 @@
-# ===============================================================
-# main_colab.py — Versi Tunggal untuk Google Colab
-# ===============================================================
-# Fitur:
-# ✅ Upload file video & audio via Google Colab
-# ✅ Potong audio jadi segmen
-# ✅ Signup otomatis di Sync.so (via Twibon / Mail API)
-# ✅ Simpan profil & hasil generate ke /content/
-# ===============================================================
+# ==========================================================
+# gomain.py — Versi AutoFix & Diagnostik untuk Google Colab
+# ==========================================================
+# ✅ Upload file audio & video via Colab
+# ✅ Potong audio jadi segmen 59 detik
+# ✅ Konversi video otomatis (fallback ke copy stream)
+# ✅ Tampilkan log FFmpeg lengkap jika gagal
+# ✅ Simpan hasil di /content/output
+# ==========================================================
 
 import os
-import json
-import time
 import ffmpeg
-import asyncio
 import shutil
+import asyncio
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from playwright.async_api import async_playwright
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from google.colab import files
 
 console = Console()
 
-# ===============================================================
-# 1️⃣ Setup Direktori
-# ===============================================================
 INPUT = "/content/input"
 OUTPUT = "/content/output"
-PROFILES = "/content/profiles"
-
 os.makedirs(INPUT, exist_ok=True)
 os.makedirs(OUTPUT, exist_ok=True)
-os.makedirs(PROFILES, exist_ok=True)
 
+USE_COLAB_UPLOAD = True
 
-# ===============================================================
-# 2️⃣ Upload File (Colab-compatible)
-# ===============================================================
+# ==========================================================
+# 🟢 Upload
+# ==========================================================
 def upload_audio():
-    print("🎧 Upload file audio (.mp3 / .wav):")
-    uploaded = files.upload()
-    for name, data in uploaded.items():
-        path = os.path.join(INPUT, name)
-        with open(path, "wb") as f:
-            f.write(data)
-        print(f"✅ Audio tersimpan: {path}")
-        return path
-    return None
-
+    if USE_COLAB_UPLOAD:
+        print("🎧 Upload file audio (.mp3 / .wav):")
+        uploaded = files.upload()
+        for name in uploaded:
+            path = os.path.join(INPUT, name)
+            shutil.move(name, path)
+            return path
+    else:
+        return os.path.join(INPUT, "audio.mp3")
 
 def upload_video():
-    print("🎞️ Upload file video (.mp4 / .mov / .avi):")
-    uploaded = files.upload()
-    for name, data in uploaded.items():
-        path = os.path.join(INPUT, name)
-        with open(path, "wb") as f:
-            f.write(data)
-        print(f"✅ Video tersimpan: {path}")
-        return path
-    return None
+    if USE_COLAB_UPLOAD:
+        print("🎞️ Upload file video (.mp4 / .mov / .avi):")
+        uploaded = files.upload()
+        for name in uploaded:
+            path = os.path.join(INPUT, name)
+            shutil.move(name, path)
+            return path
+    else:
+        return os.path.join(INPUT, "video.mp4")
 
+# ==========================================================
+# 🧠 Helper: Jalankan FFmpeg dan tampilkan log
+# ==========================================================
+def run_ffmpeg(cmd):
+    try:
+        print("⚙️  Menjalankan FFmpeg...")
+        out, err = cmd.run(capture_stdout=True, capture_stderr=True)
+        if err:
+            print(err.decode(errors="ignore"))
+    except ffmpeg.Error as e:
+        print("❌ FFmpeg Error:")
+        if e.stderr:
+            print("──── FFmpeg stderr ────")
+            print(e.stderr.decode(errors="ignore"))
+            print("────────────────────────")
+        raise
 
-# ===============================================================
-# 3️⃣ Pemrosesan Media (Audio/Video)
-# ===============================================================
+# ==========================================================
+# 🎬 Proses media
+# ==========================================================
 def process_media(audio_path, video_path):
-    print("\n🎧 Memotong audio menjadi segmen 59 detik...")
-    (
-        ffmpeg.input(audio_path)
-        .output(f"{OUTPUT}/seg_%02d.mp3", f="segment", segment_time=59, acodec="libmp3lame")
-        .run(quiet=True, overwrite_output=True)
-    )
-    print("✅ Audio selesai dipotong.")
+    print("\n🎧 Memotong audio jadi segmen 59 detik...")
 
-    print("🎞️ Mengonversi video...")
-    (
-        ffmpeg.input(video_path)
-        .output(f"{OUTPUT}/video_safe.mp4", vcodec="libx264", acodec="aac", s="1280x?")
-        .run(quiet=True, overwrite_output=True)
-    )
-    print("✅ Video dikonversi.")
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio tidak ditemukan: {audio_path}")
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video tidak ditemukan: {video_path}")
 
+    # ---- Potong Audio ----
+    try:
+        run_ffmpeg(
+            ffmpeg
+            .input(audio_path)
+            .output(
+                f"{OUTPUT}/seg_%02d.mp3",
+                f="segment",
+                segment_time=59,
+                acodec="libmp3lame"
+            )
+            .overwrite_output()
+        )
+        print("✅ Audio selesai dipotong.")
+    except Exception as e:
+        print(f"❌ Gagal potong audio: {e}")
+        raise
+
+    # ---- Konversi Video ----
+    print("\n🎞️ Mengonversi video (H.264 + AAC)...")
+    try:
+        run_ffmpeg(
+            ffmpeg
+            .input(video_path)
+            .output(
+                f"{OUTPUT}/video_safe.mp4",
+                vcodec="libx264",
+                acodec="aac",
+                preset="veryfast",
+                crf=23,
+                vf="scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                movflags="+faststart",
+                video_bitrate="1M",
+                audio_bitrate="128k",
+                **{'threads': 2}
+            )
+            .overwrite_output()
+        )
+        print("✅ Video berhasil dikonversi ke video_safe.mp4")
+
+    except ffmpeg.Error:
+        print("⚠️  Konversi penuh gagal — mencoba fallback mode (copy stream)...")
+        # fallback: hanya copy stream (tidak encode ulang)
+        run_ffmpeg(
+            ffmpeg
+            .input(video_path)
+            .output(
+                f"{OUTPUT}/video_safe.mp4",
+                vcodec="copy",
+                acodec="copy"
+            )
+            .overwrite_output()
+        )
+        print("✅ Fallback sukses: video disalin tanpa re-encode")
+
+    # Hitung jumlah segmen
     segments = len([f for f in os.listdir(OUTPUT) if f.startswith("seg_")])
-    print(f"🔢 Total segmen: {segments}")
+    print(f"🔢 Total segmen audio: {segments}")
+    print(f"📂 Hasil disimpan di folder: {OUTPUT}")
     return segments
 
-
-# ===============================================================
-# 4️⃣ Fungsi Signup Otomatis (versi Twibon / Mail)
-# ===============================================================
-async def signup_akun_sync(index: int):
-    """Membuat akun Sync.so otomatis"""
-    try:
-        console.rule(f"[bold magenta]Membuat akun {index}[/bold magenta]")
-
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = await browser.new_context()
-            page = await context.new_page()
-
-            # Buka Twibon / Mail Generator
-            await page.goto("https://taftazanie-elhaff-mailtwibon.pages.dev", timeout=60000)
-            await page.wait_for_timeout(3000)
-
-            # Ambil alamat email
-            email_el = page.locator("code").first
-            email = await email_el.inner_text()
-            console.print(f"📧 Email sementara: {email}")
-
-            # Buka Sync.so signup
-            signup = await context.new_page()
-            await signup.goto("https://sync.so/signup", timeout=60000)
-            await signup.fill("input[type=email]", email)
-            await signup.keyboard.press("Enter")
-            console.print("📨 Email dikirim ke Sync.so, menunggu OTP...")
-
-            # Kembali ke Twibon, tunggu email OTP masuk
-            await page.wait_for_timeout(8000)
-            otp_code = None
-
-            # Cari OTP (angka 6 digit)
-            html = await page.content()
-            import re
-            match = re.search(r"\b\d{6}\b", html)
-            if match:
-                otp_code = match.group(0)
-                console.print(f"🔐 OTP ditemukan: {otp_code}")
-            else:
-                console.print("❌ OTP tidak ditemukan.")
-
-            if otp_code:
-                await signup.fill("input", otp_code)
-                await signup.keyboard.press("Enter")
-                await signup.wait_for_timeout(4000)
-
-                cookies = await context.cookies()
-                profile_path = f"{PROFILES}/profile_{index}.json"
-                with open(profile_path, "w") as f:
-                    json.dump({"email": email, "cookies": cookies}, f, indent=2)
-                console.print(f"💾 Profil tersimpan: {profile_path}")
-
-            await browser.close()
-    except Exception as e:
-        console.print(f"[red]❌ Gagal signup akun {index}: {e}[/red]")
-
-
-# ===============================================================
-# 5️⃣ Fungsi Generate Sinkronisasi Final
-# ===============================================================
-async def generate_sync_final():
-    """Gabungkan segmen audio & video hasil proses"""
-    print("\n🎬 Menggabungkan hasil akhir...")
-    video = os.path.join(OUTPUT, "video_safe.mp4")
-    output_final = os.path.join(OUTPUT, "final_output.mp4")
-
-    segmen_files = sorted(
-        [os.path.join(OUTPUT, f) for f in os.listdir(OUTPUT) if f.startswith("seg_")]
-    )
-
-    # Ambil segmen pertama (contoh sederhana)
-    if segmen_files:
-        (
-            ffmpeg.input(video)
-            .output(segmen_files[0], output_final, shortest=None, vcodec="copy", acodec="aac")
-            .run(quiet=True, overwrite_output=True)
-        )
-        print(f"✅ Video final disimpan di {output_final}")
-    else:
-        print("⚠️ Tidak ada segmen audio ditemukan.")
-
-
-# ===============================================================
-# 6️⃣ MAIN UTAMA
-# ===============================================================
+# ==========================================================
+# 🚀 Fungsi utama
+# ==========================================================
 async def main():
-    print("🚀 LYPSTOOL COLAB MODE AKTIF 🚀")
+    console.print("[bold cyan]LYPSTOOL COLAB MODE AKTIF 🧩[/bold cyan]")
 
     audio_path = upload_audio()
     video_path = upload_video()
 
-    if not audio_path or not video_path:
-        print("❌ Upload file gagal. Pastikan keduanya diunggah.")
-        return
+    console.print(f"\n📁 Audio: [green]{audio_path}[/green]")
+    console.print(f"📁 Video: [green]{video_path}[/green]")
 
-    total_segments = process_media(audio_path, video_path)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("⏳ Memproses media...", start=False)
+        progress.start_task(task)
+        await asyncio.sleep(1)
+        try:
+            segments = process_media(audio_path, video_path)
+            progress.update(task, description="✅ Proses selesai!")
+        except Exception as e:
+            console.print(f"[red]❌ Error utama: {e}[/red]")
+            return
 
-    for i in range(1, total_segments + 1):
-        await signup_akun_sync(i)
+    console.print(f"\n✅ Semua selesai! Segmen audio: {segments}")
+    console.print(f"📦 Cek hasil di: [bold yellow]{OUTPUT}[/bold yellow]")
 
-    await generate_sync_final()
-    print("\n✅ Semua proses selesai tanpa error!")
-
-
-# ===============================================================
-# 7️⃣ Entry Point
-# ===============================================================
+# ==========================================================
+# 🧩 Jalankan manual
+# ==========================================================
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"❌ Error utama: {e}")
+    asyncio.run(main())
