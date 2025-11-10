@@ -1,22 +1,17 @@
 # ==========================================================
-# gomain.py — Versi AutoFix & Diagnostik untuk Google Colab
+# gomain.py — Versi 100% Stabil untuk Google Colab
 # ==========================================================
-# ✅ Upload file audio & video via Colab
+# ✅ Tanpa Rich (aman di Colab)
 # ✅ Potong audio jadi segmen 59 detik
-# ✅ Konversi video otomatis (fallback ke copy stream)
-# ✅ Tampilkan log FFmpeg lengkap jika gagal
-# ✅ Simpan hasil di /content/output
+# ✅ Konversi video (H.264 + AAC) dengan fallback otomatis
+# ✅ Timeout dan log FFmpeg aktif
 # ==========================================================
 
 import os
-import ffmpeg
-import shutil
 import asyncio
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+import subprocess
+import shutil
 from google.colab import files
-
-console = Console()
 
 INPUT = "/content/input"
 OUTPUT = "/content/output"
@@ -25,9 +20,10 @@ os.makedirs(OUTPUT, exist_ok=True)
 
 USE_COLAB_UPLOAD = True
 
-# ==========================================================
-# 🟢 Upload
-# ==========================================================
+
+# ----------------------------------------------------------
+# 📁 Upload file
+# ----------------------------------------------------------
 def upload_audio():
     if USE_COLAB_UPLOAD:
         print("🎧 Upload file audio (.mp3 / .wav):")
@@ -50,127 +46,112 @@ def upload_video():
     else:
         return os.path.join(INPUT, "video.mp4")
 
-# ==========================================================
-# 🧠 Helper: Jalankan FFmpeg dan tampilkan log
-# ==========================================================
-def run_ffmpeg(cmd):
+
+# ----------------------------------------------------------
+# ⚙️ Jalankan FFmpeg dengan timeout
+# ----------------------------------------------------------
+async def run_ffmpeg(cmd: list, timeout: int = 120):
+    print(f"\n⚙️ Menjalankan FFmpeg:\n{' '.join(cmd)}")
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
     try:
-        print("⚙️  Menjalankan FFmpeg...")
-        out, err = cmd.run(capture_stdout=True, capture_stderr=True)
-        if err:
-            print(err.decode(errors="ignore"))
-    except ffmpeg.Error as e:
-        print("❌ FFmpeg Error:")
-        if e.stderr:
-            print("──── FFmpeg stderr ────")
-            print(e.stderr.decode(errors="ignore"))
-            print("────────────────────────")
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        print("❌ Timeout: FFmpeg dihentikan otomatis.")
         raise
 
-# ==========================================================
-# 🎬 Proses media
-# ==========================================================
-def process_media(audio_path, video_path):
-    print("\n🎧 Memotong audio jadi segmen 59 detik...")
+    if process.returncode != 0:
+        print("──── FFmpeg stderr ────")
+        print(stderr.decode(errors="ignore"))
+        print("────────────────────────")
+        raise RuntimeError("FFmpeg gagal dijalankan.")
 
-    if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"Audio tidak ditemukan: {audio_path}")
-    if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Video tidak ditemukan: {video_path}")
+    print("✅ FFmpeg selesai.")
 
-    # ---- Potong Audio ----
+
+# ----------------------------------------------------------
+# 🎬 Proses utama
+# ----------------------------------------------------------
+async def process_media(audio_path, video_path):
+    print("\n🎧 Memotong audio menjadi segmen 59 detik...")
+
+    cmd_audio = [
+        "ffmpeg", "-y",
+        "-i", audio_path,
+        "-f", "segment",
+        "-segment_time", "59",
+        "-acodec", "libmp3lame",
+        f"{OUTPUT}/seg_%02d.mp3"
+    ]
+    await run_ffmpeg(cmd_audio, timeout=120)
+    print("✅ Audio selesai dipotong.")
+
+    print("\n🎞️ Mengonversi video ke format aman (H.264 + AAC)...")
+
+    cmd_video = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-vcodec", "libx264",
+        "-acodec", "aac",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-movflags", "+faststart",
+        "-b:v", "1M",
+        "-b:a", "128k",
+        f"{OUTPUT}/video_safe.mp4"
+    ]
+
     try:
-        run_ffmpeg(
-            ffmpeg
-            .input(audio_path)
-            .output(
-                f"{OUTPUT}/seg_%02d.mp3",
-                f="segment",
-                segment_time=59,
-                acodec="libmp3lame"
-            )
-            .overwrite_output()
-        )
-        print("✅ Audio selesai dipotong.")
-    except Exception as e:
-        print(f"❌ Gagal potong audio: {e}")
-        raise
-
-    # ---- Konversi Video ----
-    print("\n🎞️ Mengonversi video (H.264 + AAC)...")
-    try:
-        run_ffmpeg(
-            ffmpeg
-            .input(video_path)
-            .output(
-                f"{OUTPUT}/video_safe.mp4",
-                vcodec="libx264",
-                acodec="aac",
-                preset="veryfast",
-                crf=23,
-                vf="scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                movflags="+faststart",
-                video_bitrate="1M",
-                audio_bitrate="128k",
-                **{'threads': 2}
-            )
-            .overwrite_output()
-        )
+        await run_ffmpeg(cmd_video, timeout=240)
         print("✅ Video berhasil dikonversi ke video_safe.mp4")
+    except Exception:
+        print("⚠️ Gagal encode ulang — fallback ke copy stream.")
+        fallback_cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vcodec", "copy",
+            "-acodec", "copy",
+            f"{OUTPUT}/video_safe.mp4"
+        ]
+        await run_ffmpeg(fallback_cmd, timeout=120)
+        print("✅ Fallback sukses: video disalin tanpa re-encode.")
 
-    except ffmpeg.Error:
-        print("⚠️  Konversi penuh gagal — mencoba fallback mode (copy stream)...")
-        # fallback: hanya copy stream (tidak encode ulang)
-        run_ffmpeg(
-            ffmpeg
-            .input(video_path)
-            .output(
-                f"{OUTPUT}/video_safe.mp4",
-                vcodec="copy",
-                acodec="copy"
-            )
-            .overwrite_output()
-        )
-        print("✅ Fallback sukses: video disalin tanpa re-encode")
-
-    # Hitung jumlah segmen
     segments = len([f for f in os.listdir(OUTPUT) if f.startswith("seg_")])
     print(f"🔢 Total segmen audio: {segments}")
-    print(f"📂 Hasil disimpan di folder: {OUTPUT}")
+    print(f"📂 Hasil tersimpan di folder: {OUTPUT}")
     return segments
 
-# ==========================================================
+
+# ----------------------------------------------------------
 # 🚀 Fungsi utama
-# ==========================================================
+# ----------------------------------------------------------
 async def main():
-    console.print("[bold cyan]LYPSTOOL COLAB MODE AKTIF 🧩[/bold cyan]")
+    print("LYPSTOOL COLAB MODE AKTIF 🧩")
 
     audio_path = upload_audio()
     video_path = upload_video()
 
-    console.print(f"\n📁 Audio: [green]{audio_path}[/green]")
-    console.print(f"📁 Video: [green]{video_path}[/green]")
+    print(f"\n📁 Audio: {audio_path}")
+    print(f"📁 Video: {video_path}")
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        task = progress.add_task("⏳ Memproses media...", start=False)
-        progress.start_task(task)
-        await asyncio.sleep(1)
-        try:
-            segments = process_media(audio_path, video_path)
-            progress.update(task, description="✅ Proses selesai!")
-        except Exception as e:
-            console.print(f"[red]❌ Error utama: {e}[/red]")
-            return
+    try:
+        segments = await process_media(audio_path, video_path)
+        print("\n✅ Semua selesai!")
+        print(f"🔢 Total segmen audio: {segments}")
+        print(f"📦 Cek hasil di folder: {OUTPUT}")
+    except Exception as e:
+        print(f"❌ Error utama: {e}")
 
-    console.print(f"\n✅ Semua selesai! Segmen audio: {segments}")
-    console.print(f"📦 Cek hasil di: [bold yellow]{OUTPUT}[/bold yellow]")
 
-# ==========================================================
+# ----------------------------------------------------------
 # 🧩 Jalankan manual
-# ==========================================================
+# ----------------------------------------------------------
 if __name__ == "__main__":
     asyncio.run(main())
