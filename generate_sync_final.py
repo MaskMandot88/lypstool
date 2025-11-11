@@ -39,6 +39,29 @@ def beep():
     except:
         pass
 
+# --- Force ultra-fast network via CDP (Chromium only) ---
+def apply_fast_network(page, dl_mbps=200, ul_mbps=200, latency_ms=0):
+    """
+    Emulate 'no throttle' by setting very high throughput and near-zero latency.
+    Called per page (CDP target is the page).
+    """
+    try:
+        client = page.context.new_cdp_session(page)
+        client.send("Network.enable", {})
+        # Convert Mbps -> bytes/sec (CDP expects bytes/sec)
+        download_bps = int(dl_mbps * 1024 * 1024 / 8)
+        upload_bps   = int(ul_mbps * 1024 * 1024 / 8)
+        client.send("Network.emulateNetworkConditions", {
+            "offline": False,
+            "latency": latency_ms,                # ms
+            "downloadThroughput": download_bps,   # bytes/sec
+            "uploadThroughput": upload_bps        # bytes/sec
+        })
+        print(green(f"✅ Network emulation applied (≈{dl_mbps}Mbps down / {ul_mbps}Mbps up, {latency_ms}ms)"))
+    except Exception as e:
+        # If anything fails, just proceed without emulation
+        print(yellow(f"⚠️ Gagal apply network emulation (CDP): {e}"))
+
 # --- Highlight + robust click ---
 def highlight_and_click(page, locator, click=True, selector_str=None):
     """Highlight + safe click (re-locate + JS fallback)."""
@@ -152,7 +175,7 @@ def upload_media(page, audio_path, idx):
             with page.expect_file_chooser() as fc_info:
                 highlight_and_click(page, upload_btn)
             fc_info.value.set_files(SAFE_VIDEO)
-            page.wait_for_selector("video", timeout=180000)  # Meningkatkan waktu tunggu menjadi 3 menit
+            page.wait_for_selector("video", timeout=180000)
             print(green("✅ Upload video berhasil!"))
     except Exception as e:
         print(red(f"❌ Gagal upload video: {e}"))
@@ -200,7 +223,6 @@ def click_lipsync(page):
                 return True
             time.sleep(1)
         print(red("❌ Tidak muncul tanda 'processing'."))
-
         return False
     except Exception as e:
         print(red(f"❌ Gagal klik tombol Lipsync: {e}"))
@@ -267,7 +289,6 @@ def monitor_and_download(ctx, page, idx):
                     os.rename(old_path, new_path)
                     print(green(f"✅ File {new_file} otomatis diubah menjadi {new_path}"))
                     beep()
-
     except Exception as e:
         print(red(f"⚠️ [Profile {idx+1}] Error monitor download: {e}"))
         ts = datetime.now().strftime("%H%M%S")
@@ -313,10 +334,12 @@ def reset_folders():
 # --- Main ---
 def main():
     print(blue("=== START generate_sync_final_v148_manual_autorename ==="))
-    if not convert_video(): return
+    if not convert_video(): 
+        return
+
     audio_files = sorted(glob.glob(os.path.join(OUTPUT, "seg_*.mp3")))
     if not audio_files:
-        print(red("⚠️ Tidak ada file segmen audio di folder output/.")) 
+        print(red("⚠️ Tidak ada file segmen audio di folder output/."))
         return
 
     with sync_playwright() as pw:
@@ -326,11 +349,19 @@ def main():
             if not os.path.exists(profile):
                 print(yellow(f"⚠️ Profil {profile} tidak ditemukan."))
                 continue
+
             print(blue(f"\n=== [Profile {i+1}] ==="))
             ctx = pw.chromium.launch_persistent_context(
-                user_data_dir=profile, headless=True, accept_downloads=True
+                user_data_dir=profile,
+                headless=True,
+                accept_downloads=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
             page = ctx.new_page()
+
+            # Apply fast network emulation for this page
+            apply_fast_network(page, dl_mbps=200, ul_mbps=200, latency_ms=0)
+
             page.goto("https://sync.so/projects", timeout=60000)
 
             if not open_existing_project(page): ctx.close(); continue
@@ -342,6 +373,8 @@ def main():
 
         print(blue("\n--- MONITORING & DOWNLOAD ---"))
         for ctx, page, idx in sessions:
+            # Re-apply fast network emulation before heavy download (new CDP session)
+            apply_fast_network(page, dl_mbps=200, ul_mbps=200, latency_ms=0)
             monitor_and_download(ctx, page, idx)
 
     merge_videos()
