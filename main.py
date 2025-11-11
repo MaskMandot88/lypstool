@@ -1,157 +1,220 @@
-# ==========================================================
-# gomain.py — Versi 100% Stabil untuk Google Colab
-# ==========================================================
-# ✅ Tanpa Rich (aman di Colab)
-# ✅ Potong audio jadi segmen 59 detik
-# ✅ Konversi video (H.264 + AAC) dengan fallback otomatis
-# ✅ Timeout dan log FFmpeg aktif
-# ==========================================================
+# ============================================================
+# main.py — Full Color (Rich) wrapper around the original logic
+# (Behavior unchanged; only console output/styling changed)
+# ============================================================
 
 import os
-import asyncio
 import subprocess
+import sys
+from tkinter import Tk, filedialog
+from pydub import AudioSegment, silence
 import shutil
-from google.colab import files
+import builtins
+from datetime import datetime
 
-INPUT = "/content/input"
-OUTPUT = "/content/output"
+# --- rich console for colored output ---
+try:
+    from rich.console import Console
+    console = Console()
+except Exception:
+    console = None
+
+# Enhanced log function (keperluan konsistensi)
+def log(msg: str, color: str = "white", emoji: str = None):
+    time_str = datetime.now().strftime("%H:%M:%S")
+    prefix = f"{emoji} " if emoji else ""
+    if console:
+        console.print(f"[{time_str}] {prefix}[{color}]{msg}[/{color}]")
+    else:
+        builtins.print(f"[{time_str}] {prefix}{msg}")
+
+# Override built-in print so all old prints use rich styling
+_original_print = builtins.print
+def _rich_print(*args, **kwargs):
+    txt = " ".join(str(a) for a in args)
+    if console:
+        console.print(txt)
+    else:
+        _original_print(txt)
+builtins.print = _rich_print
+
+# -----------------------
+# Original main.py content below (unchanged logic)
+# -----------------------
+
+# Fungsi untuk memilih file
+def pilih_file_audio():
+    Tk().withdraw()  # Menyembunyikan jendela utama Tkinter
+    file_audio = filedialog.askopenfilename(title="Pilih file audio", filetypes=[("Audio Files", "*.wav *.mp3")])
+    return file_audio
+
+def pilih_file_video():
+    Tk().withdraw()  # Menyembunyikan jendela utama Tkinter
+    file_video = filedialog.askopenfilename(title="Pilih file video", filetypes=[("Video Files", "*.mp4 *.avi *.mov")])
+    return file_video
+
+# Fungsi untuk reset folder input, output, dan profiles
+def reset_folders():
+    """Menghapus isi folder input, output, dan profiles."""
+    folders = [INPUT, OUTPUT, PROFILES]
+    for folder in folders:
+        if os.path.exists(folder):
+            print(f"🧹 Menghapus isi folder: {folder}")
+            for file_name in os.listdir(folder):
+                file_path = os.path.join(folder, file_name)
+                try:
+                    if os.path.isdir(file_path):
+                        shutil.rmtree(file_path)  # Menghapus folder beserta isinya
+                    else:
+                        os.remove(file_path)  # Menghapus file
+                    print(f"✅ Dihapus: {file_path}")
+                except Exception as e:
+                    print(f"⚠️ Gagal menghapus {file_path}: {e}")
+        else:
+            os.makedirs(folder, exist_ok=True)  # Membuat folder jika tidak ada
+            print(f"ℹ️ Folder {folder} tidak ada, membuat folder baru.")
+
+# --- Path Absolut ---
+BASE = os.path.dirname(os.path.abspath(__file__))
+INPUT = os.path.join(BASE, "input")
+OUTPUT = os.path.join(BASE, "output")
+PROFILES = os.path.join(BASE, "profiles")
 os.makedirs(INPUT, exist_ok=True)
 os.makedirs(OUTPUT, exist_ok=True)
+os.makedirs(PROFILES, exist_ok=True)
 
-USE_COLAB_UPLOAD = True
-
-
-# ----------------------------------------------------------
-# 📁 Upload file
-# ----------------------------------------------------------
-def upload_audio():
-    if USE_COLAB_UPLOAD:
-        print("🎧 Upload file audio (.mp3 / .wav):")
-        uploaded = files.upload()
-        for name in uploaded:
-            path = os.path.join(INPUT, name)
-            shutil.move(name, path)
-            return path
-    else:
-        return os.path.join(INPUT, "audio.mp3")
-
-def upload_video():
-    if USE_COLAB_UPLOAD:
-        print("🎞️ Upload file video (.mp4 / .mov / .avi):")
-        uploaded = files.upload()
-        for name in uploaded:
-            path = os.path.join(INPUT, name)
-            shutil.move(name, path)
-            return path
-    else:
-        return os.path.join(INPUT, "video.mp4")
-
-
-# ----------------------------------------------------------
-# ⚙️ Jalankan FFmpeg dengan timeout
-# ----------------------------------------------------------
-async def run_ffmpeg(cmd: list, timeout: int = 120):
-    print(f"\n⚙️ Menjalankan FFmpeg:\n{' '.join(cmd)}")
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-
+# Fungsi untuk memotong audio
+def slice_audio(AUDIO_FILE):
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
-        print("❌ Timeout: FFmpeg dihentikan otomatis.")
-        raise
+        if not os.path.exists(AUDIO_FILE):
+            print(f"⚠️ File audio tidak ditemukan: {AUDIO_FILE}")
+            return 0
 
-    if process.returncode != 0:
-        print("──── FFmpeg stderr ────")
-        print(stderr.decode(errors="ignore"))
-        print("────────────────────────")
-        raise RuntimeError("FFmpeg gagal dijalankan.")
+        print(f"🎧 Memotong {AUDIO_FILE} (mencari jeda)...")
+        audio = AudioSegment.from_wav(AUDIO_FILE)
+        
+        chunk_target_ms = 59 * 1000  # target 59 detik
+        silence_search_back_ms = 8000  # maksimal mundur 8 detik untuk cari jeda
+        min_silence_len = 500  # 0.5 detik jeda
+        silence_thresh = -45  # threshold dB (atur sesuai audio)
+        
+        pos = 0
+        i = 1
+        total_segments = 0
+        
+        while pos < len(audio):
+            target_end = pos + chunk_target_ms
+            if target_end > len(audio):
+                target_end = len(audio)
+            
+            segment_to_check = audio[pos:target_end]
+            
+            silences = silence.detect_silence(
+                segment_to_check,
+                min_silence_len=min_silence_len,
+                silence_thresh=silence_thresh
+            )
+            
+            cut_point_absolute = target_end  # fallback = potong paksa di target
+            
+            if silences:
+                start_silence, end_silence = silences[-1]
+                if end_silence >= (len(segment_to_check) - silence_search_back_ms):
+                    cut_point_absolute = pos + end_silence 
 
-    print("✅ FFmpeg selesai.")
+            if target_end == len(audio):
+                cut_point_absolute = len(audio)
+            
+            if cut_point_absolute <= pos:
+                if target_end == len(audio):
+                    break
+                else:
+                    cut_point_absolute = target_end
 
+            final_segment = audio[pos:cut_point_absolute]
+            output_path = os.path.join(OUTPUT, f"seg_{i:02d}.mp3")
+            final_segment.export(output_path, format="mp3")
+            print(f"✅ dibuat: {output_path} (Durasi: {len(final_segment)/1000.0}s)")
+            
+            total_segments += 1
+            pos = cut_point_absolute
+            i += 1
+            if pos == len(audio):
+                break
 
-# ----------------------------------------------------------
-# 🎬 Proses utama
-# ----------------------------------------------------------
-async def process_media(audio_path, video_path):
-    print("\n🎧 Memotong audio menjadi segmen 59 detik...")
-
-    cmd_audio = [
-        "ffmpeg", "-y",
-        "-i", audio_path,
-        "-f", "segment",
-        "-segment_time", "59",
-        "-acodec", "libmp3lame",
-        f"{OUTPUT}/seg_%02d.mp3"
-    ]
-    await run_ffmpeg(cmd_audio, timeout=120)
-    print("✅ Audio selesai dipotong.")
-
-    print("\n🎞️ Mengonversi video ke format aman (H.264 + AAC)...")
-
-    cmd_video = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vcodec", "libx264",
-        "-acodec", "aac",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-movflags", "+faststart",
-        "-b:v", "1M",
-        "-b:a", "128k",
-        f"{OUTPUT}/video_safe.mp4"
-    ]
-
-    try:
-        await run_ffmpeg(cmd_video, timeout=240)
-        print("✅ Video berhasil dikonversi ke video_safe.mp4")
-    except Exception:
-        print("⚠️ Gagal encode ulang — fallback ke copy stream.")
-        fallback_cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vcodec", "copy",
-            "-acodec", "copy",
-            f"{OUTPUT}/video_safe.mp4"
-        ]
-        await run_ffmpeg(fallback_cmd, timeout=120)
-        print("✅ Fallback sukses: video disalin tanpa re-encode.")
-
-    segments = len([f for f in os.listdir(OUTPUT) if f.startswith("seg_")])
-    print(f"🔢 Total segmen audio: {segments}")
-    print(f"📂 Hasil tersimpan di folder: {OUTPUT}")
-    return segments
-
-
-# ----------------------------------------------------------
-# 🚀 Fungsi utama
-# ----------------------------------------------------------
-async def main():
-    print("LYPSTOOL COLAB MODE AKTIF 🧩")
-
-    audio_path = upload_audio()
-    video_path = upload_video()
-
-    print(f"\n📁 Audio: {audio_path}")
-    print(f"📁 Video: {video_path}")
-
-    try:
-        segments = await process_media(audio_path, video_path)
-        print("\n✅ Semua selesai!")
-        print(f"🔢 Total segmen audio: {segments}")
-        print(f"📦 Cek hasil di folder: {OUTPUT}")
+        print(f"\nTotal potongan audio: {total_segments}")
+        return total_segments 
+        
     except Exception as e:
-        print(f"❌ Error utama: {e}")
+        print(f"❌ Gagal memotong audio: {e}")
+        return 0 
 
+# Fungsi untuk mengonversi video
+def convert_video(RAW_VIDEO_FILE):
+    SAFE_VIDEO = os.path.join(INPUT, "video_safe.mp4")
+    if not os.path.exists(RAW_VIDEO_FILE):
+        print(f"⚠️ Tidak ada {RAW_VIDEO_FILE} untuk dikonversi.")
+        return False
+    
+    if os.path.exists(SAFE_VIDEO):
+        print(f"ℹ️ {SAFE_VIDEO} sudah ada, skip konversi.")
+        return True
+        
+    print(f"🎞️ Mengonversi {RAW_VIDEO_FILE} ke format aman (H.264 + AAC)...")
+    cmd = [
+        "ffmpeg", "-y", "-i", RAW_VIDEO_FILE,
+        "-vf", "scale=1280:-2,fps=30,format=yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        SAFE_VIDEO
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"✅ Video dikonversi aman: {SAFE_VIDEO}")
+        return True
+    except Exception as e:
+        print(f"❌ Gagal konversi video dengan FFmpeg: {e}")
+        return False
 
-# ----------------------------------------------------------
-# 🧩 Jalankan manual
-# ----------------------------------------------------------
+def main():
+    print("=== START main.py ===")
+
+    # Reset folder input, output, dan profiles
+    reset_folders()
+
+    # Memilih file audio dan video dari pengguna
+    AUDIO_FILE = pilih_file_audio()
+    RAW_VIDEO_FILE = pilih_file_video()
+
+    if not AUDIO_FILE or not RAW_VIDEO_FILE:
+        print("❌ Proses dihentikan karena file audio atau video tidak dipilih.")
+        return
+
+    # 1. Potong audio
+    total_segments = slice_audio(AUDIO_FILE)
+    
+    if total_segments == 0:
+        print("❌ Proses dihentikan karena audio gagal dipotong.")
+        return
+        
+    # 2. Konversi Video
+    if not convert_video(RAW_VIDEO_FILE):
+        print("❌ Proses dihentikan karena video gagal dikonversi.")
+        return
+
+    # 3. Lanjutkan ke proses sign-up
+    print("\n➡️ Melanjutkan ke proses sign-up...")
+    try:
+        # Jalankan menggunakan command `py -3.11` untuk menjalankan skrip
+        result = subprocess.run(["py", "-3.11", "signup_terminal_input.py"], check=True)
+        print("➡️ Proses sign-up selesai!")
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Gagal menjalankan signup_terminal_input.py. Proses dihentikan. Error: {e}")
+    except FileNotFoundError:
+        print("❌ File 'signup_terminal_input.py' tidak ditemukan.")
+    
+    print("\n➡️ Proses selesai!")
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
