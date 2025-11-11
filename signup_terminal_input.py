@@ -20,9 +20,8 @@ console = Console()
 BASE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(BASE, "output")
 PROFILES = os.path.join(BASE, "profiles")
-MAIL_URL = "https://zanmail.co-id.id/"
+MAIL_URLS = ["https://zanmail.co-id.id/", "https://mail.twibon.id/"]  # List of mail services
 SIGNUP_URL = "https://sync.so/signup"
-
 
 OTP_TIMEOUT = 180
 OTP_CHECK_INTERVAL = 2
@@ -84,19 +83,20 @@ def wait_and_click_sync_email(page, timeout=OTP_TIMEOUT):
     log("Tidak ada pesan dari Sync.so setelah waktu tunggu habis.", "red", "❌")
     return False
 
-def get_current_email(page):
+def get_current_email(page, mail_url_index=0):
     try:
         page.wait_for_selector("code.text-lg.font-mono.text-indigo-600", timeout=30000)
-        return page.locator("code.text-lg.font-mono.text-indigo-600").first.inner_text().strip()
+        email = page.locator("code.text-lg.font-mono.text-indigo-600").first.inner_text().strip()
+        return email
     except Exception:
         return None
 
-def reset_email(page):
+def reset_email(page, mail_url_index=0):
     try:
         log("Reset email...", "cyan", "🔁")
         page.click("button.bg-red-500", timeout=5000)
         page.wait_for_timeout(2000)
-        new_email = get_current_email(page)
+        new_email = get_current_email(page, mail_url_index)
         if new_email:
             log(f"Email baru: {new_email}", "green", "✅")
         else:
@@ -106,17 +106,16 @@ def reset_email(page):
         log(f"Gagal reset email: {e}", "red", "⚠️")
         return None
 
+# --- Check Invalid Email ---
 def check_invalid_email(signup_page):
+    """Check if the 'Invalid email address' error appears on the signup page."""
     try:
-        err = signup_page.locator("text=Invalid email address")
-        return err.count() > 0 and err.first.is_visible()
+        err = signup_page.locator("text=Invalid email address")  # Look for the error message
+        return err.count() > 0 and err.first.is_visible()  # Return True if error is visible
     except Exception:
-        return False
+        return False  # Return False if no error message is found
 
-# ============================================================
-# PROSES SIGNUP DAN LOGIN
-# ============================================================
-
+# Modified signup_accounts function with alternating mail URL logic
 def signup_accounts():
     os.makedirs(PROFILES, exist_ok=True)
     audio_files = sorted(glob.glob(os.path.join(OUTPUT, "seg_*.mp3")))
@@ -143,9 +142,18 @@ def signup_accounts():
                     args=["--no-sandbox", "--disable-dev-shm-usage"]
                 )
 
+                mail_url = MAIL_URLS[0]  # Try zanmail first
                 mail_page = ctx.new_page()
-                mail_page.goto(MAIL_URL, timeout=60000, wait_until="load")
+                mail_page.goto(mail_url, timeout=60000, wait_until="load")
                 email = get_current_email(mail_page)
+                
+                # If no email is found, try the second mail service
+                if not email:
+                    log(f"🔄 Tidak ada email ditemukan di {mail_url}. Beralih ke {MAIL_URLS[1]}.", "yellow", "⚠️")
+                    mail_url = MAIL_URLS[1]
+                    mail_page.goto(mail_url, timeout=60000, wait_until="load")
+                    email = get_current_email(mail_page)
+                
                 if not email:
                     log("Email tidak terbaca.", "yellow", "⚠️")
                     ctx.close()
@@ -161,7 +169,7 @@ def signup_accounts():
                 time.sleep(3)
                 if check_invalid_email(signup_page):
                     log("Email invalid, reset...", "red", "❌")
-                    new_email = reset_email(mail_page)
+                    new_email = reset_email(mail_page, mail_url_index=1)
                     if not new_email:
                         ctx.close()
                         continue
@@ -206,36 +214,9 @@ def signup_accounts():
     console.rule("[bold green]🎉 Semua akun berhasil dibuat![/bold green]")
     return True
 
-# ============================================================
-# Fungsi Login Manual jika Signup Gagal
-# ============================================================
-
-def manual_login(ctx):
-    """Fungsi untuk login manual menggunakan email dan OTP yang dimasukkan oleh pengguna di terminal."""
-    print("💬 Masukkan email dan OTP secara manual untuk login.")
-    email = input("Masukkan Email: ").strip()
-    otp = input("Masukkan OTP: ").strip()
-
-    try:
-        signup_page = ctx.new_page()
-        signup_page.goto(SIGNUP_URL, timeout=60000, wait_until="load")
-        signup_page.fill("input[type=email]", email)
-        signup_page.keyboard.press("Enter")
-        time.sleep(3)
-
-        otp_input = signup_page.locator("input").first
-        otp_input.fill(otp)
-        otp_input.press("Enter")
-
-        signup_page.wait_for_url("**/studio**", timeout=60000, wait_until="load")
-        log("Login manual berhasil!", "green", "🎉")
-    except Exception as e:
-        log(f"Login manual gagal: {e}", "red", "❌")
-
-# ============================================================
-# EKSEKUSI UTAMA
-# ============================================================
-
+# ===============================
+# Eksekusi Utama
+# ===============================
 if __name__ == "__main__":
     if signup_accounts():
         log("Jalankan generate_sync_final.py ...", "cyan", "➡️")
